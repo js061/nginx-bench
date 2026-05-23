@@ -31,7 +31,7 @@ Options:
   -u URL          target URL               (default: https://127.0.0.1:8089/test.html)
   -s SCRIPT       LuaJIT script for wrk
   -H HEADER       add HTTP header (repeatable)
-  --rps RPS       throttle to target requests/sec (approximate)
+  --rps RPS       throttle to target requests/sec; 0 or inf = no throttle
   --latency       print detailed latency percentiles
   --timeout SEC   mark request failed after SEC seconds
   --keep-server   skip nginx start/stop (use if nginx is already running)
@@ -68,13 +68,20 @@ done
 # -- RPS throttle
 TMPSCRIPT=""
 if [[ -n "$TARGET_RPS" ]]; then
-    [[ "$TARGET_RPS" =~ ^[0-9]+$ ]] || { echo "ERROR: --rps must be a positive integer" >&2; exit 1; }
-    DELAY_MS=$(awk -v c="$CONNECTIONS" -v r="$TARGET_RPS" 'BEGIN{printf "%d", int(c/r*1000 + 0.5)}')
-    TMPSCRIPT="$(mktemp /tmp/wrk-delay-XXXXXX.lua)"
-    printf 'function delay()\n  return %d\nend\n' "$DELAY_MS" > "$TMPSCRIPT"
-    echo "RPS throttle: ${TARGET_RPS} req/s → ${DELAY_MS}ms delay per connection"
-    [[ -n "$LUA_SCRIPT" ]] && echo "WARNING: --rps overrides -s (user Lua script ignored)"
-    LUA_SCRIPT="$TMPSCRIPT"
+    case "${TARGET_RPS,,}" in
+        0|inf|infinite)
+            echo "RPS throttle: unlimited (no throttle)"
+            ;;
+        *)
+            [[ "$TARGET_RPS" =~ ^[0-9]+$ ]] || { echo "ERROR: --rps must be a positive integer, 0, or inf" >&2; exit 1; }
+            DELAY_MS=$(awk -v c="$CONNECTIONS" -v r="$TARGET_RPS" 'BEGIN{printf "%d", int(c/r*1000 + 0.5)}')
+            TMPSCRIPT="$(mktemp /tmp/wrk-delay-XXXXXX.lua)"
+            printf 'function delay()\n  return %d\nend\n' "$DELAY_MS" > "$TMPSCRIPT"
+            echo "RPS throttle: ${TARGET_RPS} req/s → ${DELAY_MS}ms delay per connection"
+            [[ -n "$LUA_SCRIPT" ]] && echo "WARNING: --rps overrides -s (user Lua script ignored)"
+            LUA_SCRIPT="$TMPSCRIPT"
+            ;;
+    esac
 fi
 
 # -- CPU affinity for wrk threads
