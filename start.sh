@@ -17,6 +17,8 @@ Worker count and CPU affinity are set via environment variables:
   NGINX_CORES        pin workers to CPU cores, e.g. 0-3 or 0,2,4,6
                      (sets worker count to the number of cores listed)
   NGINX_MASTER_CORE  pin the master process to a single CPU core
+  LOG_REQUESTS       if set, enable access_log with \$msec timestamps
+                     (logs/access.log; truncated at startup)
 
 Options:
   -h, --help         show this help
@@ -43,6 +45,7 @@ done
 WORKERS="${WORKER_NUMS:-}"
 NGINX_CORES="${NGINX_CORES:-}"
 NGINX_MASTER_CORE="${NGINX_MASTER_CORE:-}"
+LOG_REQUESTS="${LOG_REQUESTS:-}"
 CONF="conf/nginx.conf"
 TMPCONF=""
 AFFINITY_MASKS=""
@@ -84,17 +87,26 @@ if [[ -n "$NGINX_CORES" ]]; then
     AFFINITY_MASKS="${AFFINITY_MASKS# }"
 fi
 
-if [[ -n "$WORKERS" ]]; then
-    [[ "$WORKERS" =~ ^[0-9]+$ ]] || { echo "ERROR: workers must be a positive integer" >&2; exit 1; }
+if [[ -n "$WORKERS" || -n "$LOG_REQUESTS" ]]; then
+    [[ -z "$WORKERS" || "$WORKERS" =~ ^[0-9]+$ ]] || { echo "ERROR: workers must be a positive integer" >&2; exit 1; }
     TMPCONF="$(mktemp "$DIST_DIR/nginx/conf/nginx.tmp.XXXXXX.conf")"
-    if [[ -n "$AFFINITY_MASKS" ]]; then
-        sed "s|^\s*worker_processes\s.*;|worker_processes ${WORKERS};\nworker_cpu_affinity ${AFFINITY_MASKS};|" \
-            "$DIST_DIR/nginx/conf/nginx.conf" > "$TMPCONF"
-        echo "CPU affinity: workers pinned to cores [${NGINX_CORES}]"
-    else
-        sed "s/^\s*worker_processes\s.*;/worker_processes ${WORKERS};/" \
-            "$DIST_DIR/nginx/conf/nginx.conf" > "$TMPCONF"
+    cp "$DIST_DIR/nginx/conf/nginx.conf" "$TMPCONF"
+
+    if [[ -n "$WORKERS" ]]; then
+        if [[ -n "$AFFINITY_MASKS" ]]; then
+            sed -i "s|^\s*worker_processes\s.*;|worker_processes ${WORKERS};\nworker_cpu_affinity ${AFFINITY_MASKS};|" "$TMPCONF"
+            echo "CPU affinity: workers pinned to cores [${NGINX_CORES}]"
+        else
+            sed -i "s/^\s*worker_processes\s.*;/worker_processes ${WORKERS};/" "$TMPCONF"
+        fi
     fi
+
+    if [[ -n "$LOG_REQUESTS" ]]; then
+        : > "$DIST_DIR/nginx/logs/access.log"   # truncate prior trace
+        sed -i "s|^\([[:space:]]*\)access_log[[:space:]]\+off;|\1log_format msec '\$msec';\n\1access_log logs/access.log msec;|" "$TMPCONF"
+        echo "Request logging: enabled (logs/access.log, msec timestamps)"
+    fi
+
     CONF="conf/$(basename "$TMPCONF")"
 fi
 

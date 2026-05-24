@@ -17,6 +17,8 @@ Detects your distro (Debian/Ubuntu, RHEL/CentOS/Fedora, Arch, macOS) and install
 ```bash
 ./install.sh          # download, compile, configure (one-time)
 ./bench.sh            # start nginx, run benchmark, stop nginx
+./run.sh              # single run, saves output to rst/
+./batch-run.sh        # sweep many configs (edit arrays at the top first)
 ```
 
 ## Scripts
@@ -72,7 +74,8 @@ Runs a full benchmark. By default manages nginx lifecycle (starts before, stops 
 | `-u URL` | `https://127.0.0.1:8089/test.html` | Target URL |
 | `-s SCRIPT` | — | LuaJIT script for custom request logic |
 | `-H HEADER` | — | Add HTTP header (repeatable) |
-| `--rps RPS` | — | Throttle to a target requests/sec (approximate) |
+| `--rps RPS` | — | Throttle to a target requests/sec; `0` or `inf` = no throttle |
+| `--rps-dist NAME` | `const` | Inter-arrival distribution for `--rps`: `const`, `normal`, `exp`, `lognormal`, `pareto`, `onoff` |
 | `--latency` | — | Print p50/p75/p90/p99 latency breakdown |
 | `--timeout SEC` | — | Mark a request failed after SEC seconds |
 | `--keep-server` | — | Skip nginx start/stop |
@@ -90,6 +93,48 @@ WRK_CORES=0,2,4,6 ./bench.sh -t 4          # list syntax
 ```
 
 wrk is a single process with internal threads, so pinning is done by launching it under `taskset -c` — all wrk threads are confined to the listed cores. Pair it with `start.sh`'s `NGINX_CORES` to keep the load generator and the server on separate cores.
+
+#### `--rps-dist` distributions
+
+All six preserve `E[delay] = (CONN / target_rps) × 1000` ms, so target RPS is unchanged — only the *shape* of inter-arrivals varies:
+
+| Name | Behavior | Typical use |
+|---|---|---|
+| `const` | every gap = mean | smooth, repeatable; default |
+| `normal` | mean ± σ jitter (σ = mean/3) | gentle bell-curve noise |
+| `exp` | exponential / Poisson arrivals | realistic baseline for independent clients |
+| `lognormal` | right-skewed (log σ = 0.5) | occasional long pauses |
+| `pareto` | heavy-tailed (α = 1.5) | bursty / self-similar traffic |
+| `onoff` | stateful bursts (K=10 reqs at 10× rate, then 10× silence) | per-thread user model |
+
+### `run.sh`
+
+Single-run driver: stops any running nginx, starts it with the configured CPU affinity, runs one benchmark via `bench.sh`, and saves the full output (with UTC `Start:` / `End:` timestamps) to a file in `rst/`. Filenames encode every config parameter plus a UTC timestamp, so repeated runs accumulate without overwriting.
+
+```bash
+./run.sh                                       # use the defaults baked into run.sh
+NGINX_CORES=0-7 WRK_CORES=8-11 THREADS=4 ./run.sh   # override any setting via env var
+```
+
+Override env vars: `NGINX_MASTER_CORE`, `NGINX_CORES`, `WRK_CORES`, `THREADS`, `CONNECTIONS`, `DURATION`, `TARGETRPS`, plus optional `RUN_TAG` injected into the filename.
+
+### `batch-run.sh`
+
+Sweeps the Cartesian product of setting arrays, optionally repeated `REPEATS` times (outermost loop). Each iteration calls `run.sh` with the right env vars; outputs go to `rst/` with the repeat number in the filename. Edit the arrays at the top of the script to define a sweep.
+
+```bash
+# inside batch-run.sh
+REPEATS=3
+NGINX_CORES_arr=(1-8 1-16)
+CONNECTIONS_arr=(100 500 1000)
+DURATION_arr=(60)
+TARGETRPS_arr=(1000 10000 inf)
+# ... etc.
+
+./batch-run.sh   # prints [batch X/total] progress for each combination
+```
+
+`run.sh` always restarts nginx, so each combination gets a clean server with the right affinity. The loop continues on per-run failures (e.g. mismatched `WRK_CORES` vs `THREADS`), so unattended sweeps stay running.
 
 ## Examples
 
@@ -115,6 +160,12 @@ done
 # Throttle load to a fixed rate instead of max throughput
 ./bench.sh --rps 5000 -c 100 -d 30s
 
+# Realistic Poisson arrivals at the same target rate
+./bench.sh --rps 5000 --rps-dist exp -c 100 -d 60s
+
+# Bursty load (heavy-tailed) for stress testing
+./bench.sh --rps 5000 --rps-dist pareto -c 100 -d 60s
+
 # Isolate load generator and server on separate cores
 NGINX_CORES=0-7 ./start.sh
 WRK_CORES=8-11 ./bench.sh -t 4 -c 100 --keep-server
@@ -138,6 +189,9 @@ dist/
 ├── wrk                         wrk binary
 ├── localhost.cert              self-signed TLS certificate (RSA 4096, 365 days)
 └── localhost.key               private key (chmod 600)
+
+rst/                             benchmark output files (created by run.sh / batch-run.sh)
+└── nginx-m0-w1-8_wrk-cpu20-29-t10-c300-d100-rps1000_rep1_20260522-143005.out
 ```
 
 ## Comparison to PTS
@@ -148,9 +202,12 @@ dist/
 | Duration | Hardcoded 90s | Any value via `-d` |
 | Threads | Hardcoded `$(nproc)` | Configurable via `-t` |
 | Latency stats | Not shown | `--latency` flag |
-| Rate limiting | Not supported | `--rps` throttle |
+| Rate limiting | Not supported | `--rps` throttle (`0`/`inf` = unlimited) |
+| Load shape | Closed-loop only | `--rps-dist`: const, normal, exp, lognormal, pareto, onoff |
 | CPU affinity | Not supported | `NGINX_CORES` / `NGINX_MASTER_CORE` (server) and `WRK_CORES` (load generator) |
+| Result archival | Automated PTS DB | Config-named `.out` files in `rst/` via `run.sh` |
+| Config sweeps | Manual outer loop | `batch-run.sh` (Cartesian product over setting arrays, repeats) |
 | Lua scripting | Not supported | `-s script.lua` |
 | Custom headers | Not supported | `-H "Header: value"` |
 | Result parsing | Automated into PTS result DB | Raw wrk output to stdout |
-| Iterations | 3 runs per config, averaged | Manual |
+| Iterations | 3 runs per config, averaged | `REPEATS` in `batch-run.sh` |
