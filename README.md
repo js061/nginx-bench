@@ -49,6 +49,7 @@ Start and stop the nginx server manually. Useful when running multiple back-to-b
 | `WORKER_NUMS` | Number of nginx worker processes (default: `auto` — one per core) |
 | `NGINX_CORES` | Pin workers to specific CPU cores — accepts a list (`0,2,4`), ranges (`0-3`), or a mix (`0-3,6,8-11`); sets the worker count to the number of cores listed |
 | `NGINX_MASTER_CORE` | Pin the nginx master process to a single CPU core (via `taskset`) |
+| `LOG_REQUESTS` | If set (e.g. `=1`), enable nginx `access_log` with `$msec` timestamps to `dist/nginx/logs/access.log` (truncated at startup). Used by `run.sh --trace`; you usually don't set this directly. |
 
 ```bash
 WORKER_NUMS=4 ./start.sh                          # 4 workers, no pinning
@@ -107,16 +108,56 @@ All six preserve `E[delay] = (CONN / target_rps) × 1000` ms, so target RPS is u
 | `pareto` | heavy-tailed (α = 1.5) | bursty / self-similar traffic |
 | `onoff` | stateful bursts (K=10 reqs at 10× rate, then 10× silence) | per-thread user model |
 
+The shape parameters (σ, α, K, rate ratio) are tunable without editing `bench.sh` — see [`config/rps-dist.sh`](#configrps-distsh).
+
+#### `config/rps-dist.sh`
+
+`bench.sh` sources this file (if present) at startup to override the baked-in shape params. Each line is a plain shell assignment:
+
+```bash
+RPS_DIST_NORMAL_SIGMA_FACTOR=0.333   # normal σ as a fraction of the mean
+RPS_DIST_LOGNORMAL_SIGMA=0.5         # lognormal σ in log-space
+RPS_DIST_PARETO_ALPHA=1.5            # pareto shape; must be > 1; lower = heavier tail
+RPS_DIST_ONOFF_K=10                  # onoff: requests per burst
+RPS_DIST_ONOFF_RATE_RATIO=10         # onoff: burst rate / mean rate
+```
+
+All values must be positive numbers (validated at startup; bad values produce a clear error before any benchmark runs). The mean is preserved at `(CONNECTIONS / target_rps) * 1000 ms` for every distribution and parameter setting, so the target RPS is unchanged — only the variance / shape changes. The actual params used are written into the `RPS throttle:` line of each run's output, so results stay self-documenting.
+
 ### `run.sh`
 
 Single-run driver: stops any running nginx, starts it with the configured CPU affinity, runs one benchmark via `bench.sh`, and saves the full output (with UTC `Start:` / `End:` timestamps) to a file in `rst/`. Filenames encode every config parameter plus a UTC timestamp, so repeated runs accumulate without overwriting.
 
 ```bash
 ./run.sh                                       # use the defaults baked into run.sh
-NGINX_CORES=0-7 WRK_CORES=8-11 THREADS=4 ./run.sh   # override any setting via env var
+NGINX_CORES=0-7 WRK_CORES=8-11 ./run.sh        # override any setting via env var
+TARGETRPS_DIST=pareto ./run.sh                 # switch the rps distribution shape
+./run.sh --trace --plot                        # also capture + plot the request traffic
 ```
 
-Override env vars: `NGINX_MASTER_CORE`, `NGINX_CORES`, `WRK_CORES`, `THREADS`, `CONNECTIONS`, `DURATION`, `TARGETRPS`, plus optional `RUN_TAG` injected into the filename.
+**Override env vars:** `NGINX_MASTER_CORE`, `NGINX_CORES`, `WRK_CORES`, `THREADS`, `CONNECTIONS`, `DURATION`, `TARGETRPS`, `TARGETRPS_DIST`, plus optional `RUN_TAG` injected into the filename.
+
+If you set `WRK_CORES` but not `THREADS`, `THREADS` is auto-derived from the `WRK_CORES` core count (so the strict `--t == core-count` rule in `bench.sh` doesn't bite you with a stale default).
+
+**Flags:**
+
+| Flag | Description |
+|---|---|
+| `--trace` | Enable nginx `access_log` during the run; archive the `.access.log` next to the `.out`. The `.out` file is **self-documenting** — it ends with a `Plot:` line containing the exact `plot-rps.py` command to render later. |
+| `--plot` | Also render a `.png` plot via `plot-rps.py` (requires `python3 + numpy + matplotlib`). No effect without `--trace`. |
+
+#### Traffic visualization (`plot-rps.py`)
+
+`plot-rps.py` reads an access log captured via `--trace` (one float timestamp per line, nginx's `$msec`) and produces a single PNG with two stacked subplots:
+
+- **RPS over time** — instantaneous rate per 100 ms bucket; lets you eyeball bursts and ramp-up.
+- **Inter-arrival histogram** — distribution of gaps between consecutive requests; the direct fingerprint of `--rps-dist` (const = spike, exp = exponential decay, pareto = heavy tail, onoff = bimodal).
+
+Render any saved trace later:
+```bash
+python3 ./plot-rps.py rst/<run>.access.log rst/<run>.png
+```
+The exact command is also written into the matching `.out` file, so you can copy-paste it.
 
 ### `batch-run.sh`
 
@@ -169,6 +210,14 @@ done
 # Isolate load generator and server on separate cores
 NGINX_CORES=0-7 ./start.sh
 WRK_CORES=8-11 ./bench.sh -t 4 -c 100 --keep-server
+
+# Capture and visualize the actual request traffic shape
+./run.sh --trace --plot                              # produces .out + .access.log + .png
+TARGETRPS_DIST=pareto ./run.sh --trace --plot        # see the heavy-tail in the histogram
+
+# Tune the pareto tail without editing bench.sh
+echo 'RPS_DIST_PARETO_ALPHA=1.2' >> config/rps-dist.sh
+TARGETRPS_DIST=pareto ./run.sh --trace --plot        # heavier tail than the default α=1.5
 ```
 
 ## Directory Layout
@@ -190,24 +239,13 @@ dist/
 ├── localhost.cert              self-signed TLS certificate (RSA 4096, 365 days)
 └── localhost.key               private key (chmod 600)
 
+config/
+└── rps-dist.sh                  tunable shape params for --rps-dist (sourced by bench.sh)
+
+plot-rps.py                      render PNG plots from --trace .access.log files
+
 rst/                             benchmark output files (created by run.sh / batch-run.sh)
-└── nginx-m0-w1-8_wrk-cpu20-29-t10-c300-d100-rps1000_rep1_20260522-143005.out
+├── nginx-m0-w1-8_wrk-cpu20-29-t10-c300-d100-rps1000-distconst_rep1_20260522-143005.out
+├── nginx-m0-w1-8_wrk-cpu20-29-t10-c300-d100-rps1000-distconst_rep1_20260522-143005.access.log   # with --trace
+└── nginx-m0-w1-8_wrk-cpu20-29-t10-c300-d100-rps1000-distconst_rep1_20260522-143005.png         # with --trace --plot
 ```
-
-## Comparison to PTS
-
-| | PTS `batch-run nginx` | This pipeline |
-|---|---|---|
-| Connections | Fixed menu: 1, 20, 100, 200, 500, 1000, 4000 | Any value via `-c` |
-| Duration | Hardcoded 90s | Any value via `-d` |
-| Threads | Hardcoded `$(nproc)` | Configurable via `-t` |
-| Latency stats | Not shown | `--latency` flag |
-| Rate limiting | Not supported | `--rps` throttle (`0`/`inf` = unlimited) |
-| Load shape | Closed-loop only | `--rps-dist`: const, normal, exp, lognormal, pareto, onoff |
-| CPU affinity | Not supported | `NGINX_CORES` / `NGINX_MASTER_CORE` (server) and `WRK_CORES` (load generator) |
-| Result archival | Automated PTS DB | Config-named `.out` files in `rst/` via `run.sh` |
-| Config sweeps | Manual outer loop | `batch-run.sh` (Cartesian product over setting arrays, repeats) |
-| Lua scripting | Not supported | `-s script.lua` |
-| Custom headers | Not supported | `-H "Header: value"` |
-| Result parsing | Automated into PTS result DB | Raw wrk output to stdout |
-| Iterations | 3 runs per config, averaged | `REPEATS` in `batch-run.sh` |
