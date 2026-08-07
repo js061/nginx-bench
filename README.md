@@ -72,6 +72,7 @@ Runs a full benchmark. By default manages nginx lifecycle (starts before, stops 
 | `-t THREADS` | `$(nproc)` | Number of wrk threads |
 | `-c CONNECTIONS` | `100` | Concurrent HTTP connections |
 | `-d DURATION` | `90s` | Test duration (`10s`, `2m`, `1h`) |
+| `-n, --requests N` | — | Stop after **~N** total requests, then report over the actual elapsed time. The count is split evenly across threads (`ceil(N/THREADS)` each) and the first thread to finish signals wrk to exit, so the real total lands a little above or below N. `-d` still applies as an upper bound — whichever limit is hit first ends the run. |
 | `-u URL` | `https://127.0.0.1:8089/test.html` | Target URL |
 | `-s SCRIPT` | — | LuaJIT script for custom request logic |
 | `-H HEADER` | — | Add HTTP header (repeatable) |
