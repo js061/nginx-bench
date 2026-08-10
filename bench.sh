@@ -221,7 +221,23 @@ fi
 # -- CPU affinity for wrk threads
 if [[ -n "${WRK_CORES:-}" ]]; then
     command -v taskset &>/dev/null || { echo "ERROR: taskset not found (install util-linux)" >&2; exit 1; }
-    NUM_CPUS=$(nproc)
+    # NOTE: wrk is pinned via `taskset -c <real cpu id>`, not an nproc-wide
+    # bitmask, so cores need only be online -- not < nproc. (nproc counts
+    # online CPUs, which can be a sparse ID range, e.g. 0,2,4,...,22 when
+    # SMT siblings are interleaved rather than offset by nproc/2.)
+    expand_cpu_spec() {
+        local spec=$1 tok lo hi c
+        local IFS=','
+        for tok in $spec; do
+            if [[ "$tok" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                lo="${BASH_REMATCH[1]}"; hi="${BASH_REMATCH[2]}"
+                for (( c=lo; c<=hi; c++ )); do echo "$c"; done
+            elif [[ "$tok" =~ ^[0-9]+$ ]]; then
+                echo "$tok"
+            fi
+        done
+    }
+    ONLINE_CPUS=",$(expand_cpu_spec "$(cat /sys/devices/system/cpu/online 2>/dev/null)" | tr '\n' ','),"
     CORES=()
     IFS=',' read -ra TOKENS <<< "$WRK_CORES"
     for token in "${TOKENS[@]}"; do
@@ -236,7 +252,7 @@ if [[ -n "${WRK_CORES:-}" ]]; then
         fi
     done
     for core in "${CORES[@]}"; do
-        (( core < NUM_CPUS )) || { echo "ERROR: core $core >= nproc ($NUM_CPUS)" >&2; exit 1; }
+        [[ "$ONLINE_CPUS" == *",$core,"* ]] || { echo "ERROR: core $core is not an online CPU" >&2; exit 1; }
     done
     if (( ${#CORES[@]} != THREADS )); then
         echo "ERROR: WRK_CORES lists ${#CORES[@]} core(s) but -t is ${THREADS}; counts must match" >&2
