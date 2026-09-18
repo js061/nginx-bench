@@ -72,6 +72,7 @@ Runs a full benchmark. By default manages nginx lifecycle (starts before, stops 
 | `-t THREADS` | `$(nproc)` | Number of wrk threads |
 | `-c CONNECTIONS` | `100` | Concurrent HTTP connections |
 | `-d DURATION` | `90s` | Test duration (`10s`, `2m`, `1h`) |
+| `-n REQUESTS` | — | Stop after ~N total requests instead of running for `-d` (see [Request-count mode](#request-count-mode)) |
 | `-u URL` | `https://127.0.0.1:8089/test.html` | Target URL |
 | `-s SCRIPT` | — | LuaJIT script for custom request logic |
 | `-H HEADER` | — | Add HTTP header (repeatable) |
@@ -94,6 +95,20 @@ WRK_CORES=0,2,4,6 ./bench.sh -t 4          # list syntax
 ```
 
 wrk is a single process with internal threads, so pinning is done by launching it under `taskset -c` — all wrk threads are confined to the listed cores. Pair it with `start.sh`'s `NGINX_CORES` to keep the load generator and the server on separate cores.
+
+#### Request-count mode (`-n`)
+
+By default wrk is **duration-driven** (`-d`) — it has no native "send N requests" option. `-n N` layers that on top: it generates a wrk Lua script giving each thread a quota of `N / THREADS` requests and calling `wrk.thread:stop()` once the quota is hit, so the load is capped at (approximately) **N total requests**.
+
+```bash
+./bench.sh -n 500000 -c 100            # ~500k requests, full speed
+./bench.sh -n 500000 --rps 20000       # ~500k requests, throttled
+```
+
+Two details are important for this wrk build:
+
+- **Count is approximate.** N is rounded **up** to a multiple of `THREADS` (each thread runs `ceil(N/THREADS)`), and a few in-flight requests may complete after the cap. Use a multiple of `-t` for an exact number.
+- **`-d` is a hard wall-clock cap.** Once every worker reaches its quota, `bench.sh` interrupts wrk's otherwise-idle main thread so the report is printed immediately. If `-d` expires first, the run still finishes at that cap but returns an error because fewer than the requested number completed. When `-d` is omitted, a short (~3 s) warmup estimates a suitable safety cap.
 
 #### `--rps-dist` distributions
 
@@ -197,6 +212,9 @@ done
 
 # POST requests via Lua script
 ./bench.sh -s post.lua -c 100 -d 30s
+
+# Run a fixed total number of requests instead of a fixed duration
+./bench.sh -n 1000000 -c 100
 
 # Throttle load to a fixed rate instead of max throughput
 ./bench.sh --rps 5000 -c 100 -d 30s
