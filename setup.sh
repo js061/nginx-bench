@@ -7,10 +7,11 @@ set -euo pipefail
 #   zlib            — nginx zlib support
 #   curl            — download source tarballs
 #   perl            — required by openssl build bundled inside wrk
+#   unzip           — required to unpack LuaJIT source bundled inside wrk
 
-PKGS_DEBIAN="build-essential libssl-dev zlib1g-dev curl perl"
-PKGS_RPM="gcc gcc-c++ make openssl-devel zlib-devel curl perl"
-PKGS_ARCH="base-devel openssl zlib curl perl"
+PKGS_DEBIAN="build-essential libssl-dev zlib1g-dev curl perl unzip"
+PKGS_RPM="gcc gcc-c++ make openssl-devel zlib-devel curl perl unzip"
+PKGS_ARCH="base-devel openssl zlib curl perl unzip"
 PKGS_BREW="openssl zlib curl"
 
 info()  { echo "==> $*"; }
@@ -90,7 +91,7 @@ case "$OS" in
     *)
         echo "ERROR: Unrecognised OS. Install these packages manually:" >&2
         echo "" >&2
-        echo "  gcc, g++, make, openssl (dev headers), zlib (dev headers), curl, perl" >&2
+        echo "  gcc, g++, make, openssl (dev headers), zlib (dev headers), curl, perl, unzip" >&2
         echo "" >&2
         echo "  Debian/Ubuntu : sudo apt-get install $PKGS_DEBIAN" >&2
         echo "  RHEL/CentOS   : sudo dnf install $PKGS_RPM" >&2
@@ -103,7 +104,7 @@ esac
 echo ""
 info "Verifying required tools..."
 ALL_OK=1
-for cmd in gcc make openssl curl perl; do
+for cmd in gcc make openssl curl perl unzip; do
     if command -v "$cmd" &>/dev/null; then
         ok "$cmd  ($(command -v "$cmd"))"
     else
